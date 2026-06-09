@@ -1,1 +1,231 @@
+import os
+import time
+from flask import Flask, request, jsonify, render_template, session, redirect, url_for
+from functools import wraps
+import cloudinary
+import cloudinary.uploader
+import cloudinary.api
+
+# Dynamically link frontend template and static files folders
+base_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+frontend_dir = os.path.join(base_dir, 'frontend')
+
+app = Flask(
+    __name__,
+    template_folder=os.path.join(frontend_dir, 'templates'),
+    static_folder=os.path.join(frontend_dir, 'static')
+)
+
+# Added Secret Key for secure state tracking sessions
+app.secret_key = "super_secret_gallery_key_change_this_in_production"
+
+# In-memory user state mock registry
+USERS_DB = {}
+
+# Authentication Access Shield Guard
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'user' not in session:
+            if request.is_json or request.path.startswith('/api/'):
+                return jsonify({"error": "Unauthorized endpoint access. System verification barrier active."}), 401
+            return render_template('index.html')
+        return f(*args, **kwargs)
+    return decorated_function
+
+# Configure Cloudinary (Replace with your credentials) 
+cloudinary.config(
+    cloud_name="dtwbsfpzm",
+    api_key="726687349595488",
+    api_secret="5Yrb2Cb6AmJWQHnJqBgrgMVgL6g",
+    secure = True
+)
+
+LOCAL_FOLDER = os.path.join(base_dir, 'local_media')
+
+def upload_local_media_on_start():
+    """Scans local folder and syncs files to Cloudinary grouping them in a 'Local Sync' tag folder."""
+    if not os.path.exists(LOCAL_FOLDER):
+        os.makedirs(LOCAL_FOLDER)
+        return
+
+    print("Checking local folder for media sync...")
+    supported_extensions = ('.jpg', '.jpeg', '.png', '.gif', '.mp4', '.mov', '.avi') #
+    
+    for filename in os.listdir(LOCAL_FOLDER):
+        if filename.lower().endswith(supported_extensions):
+            local_path = os.path.join(LOCAL_FOLDER, filename)
+            public_id = os.path.splitext(filename)[0]
+            resource_type = 'video' if filename.lower().endswith(('.mp4', '.mov', '.avi')) else 'image'
+            
+            try: #
+                cloudinary.api.resource(public_id, resource_type=resource_type)
+                print(f"'{filename}' already exists in Cloudinary. Skipping.") #
+            except cloudinary.exceptions.NotFound:
+                print(f"Uploading local file '{filename}' to Cloudinary...")
+                try:
+                    # Default system boot sync utilizes a fallback global tracking string prefix
+                    cloudinary.uploader.upload(local_path, public_id=public_id, resource_type=resource_type, tags=["system_sync___Local Sync"]) #
+                except Exception as e:
+                    print(f"Failed to upload {filename}: {e}")
+
+# --- SECURITY HANDLER API ENDPOINTS ---
+@app.route('/api/register', methods=['POST'])
+def register():
+    data = request.get_json() or {}
+    username = data.get('username', '').strip()
+    password = data.get('password', '').strip()
+    
+    if not username or not password:
+        return jsonify({'success': False, 'message': 'Username and password variables are required.'}), 400
+        
+    if username in USERS_DB:
+        return jsonify({'success': False, 'message': 'Profile identity tag already exists.'}), 400
+        
+    USERS_DB[username] = password
+    session['user'] = username  # Automatically transitions client pipeline directly to dashboard environment
+    return jsonify({'success': True, 'message': 'Registration phase mapped securely!'})
+
+@app.route('/api/login', methods=['POST'])
+def login():
+    data = request.get_json() or {}
+    username = data.get('username', '').strip()
+    password = data.get('password', '').strip()
+    
+    if username in USERS_DB and USERS_DB[username] == password:
+        session['user'] = username
+        return jsonify({'success': True, 'message': 'Credentials matched and validated.'})
+        
+    return jsonify({'success': False, 'message': 'Invalid verification coordinates.'}), 401
+
+@app.route('/logout')
+def logout():
+    session.pop('user', None)
+    return redirect('/')
+
+# --- ROUTE RENDERING OPERATIONS ---
+@app.route('/')
+@login_required
+def index():
+    return render_template('index.html')
+
+@app.route('/home')
+@login_required
+def home_page():
+    """Renders the highly attractive standalone home interface platform view."""
+    return render_template('home.html')
+
+@app.route('/contact')
+@login_required
+def contact_page():
+    """Renders the highly attractive contact structural grid info sheet."""
+    return render_template('contact.html')
+
+@app.route('/api/media', methods=['GET'])
+@login_required
+def get_media():
+    try:
+        media_list = []
+        current_user = session.get('user')
+        # Isolation prefix structure used to filter files specific to this logged in identifier
+        user_prefix = f"{current_user}___"
+        
+        # Fetch Images
+        images = cloudinary.api.resources(resource_type="image", max_results=100, tags=True)
+        for img in images.get('resources', []):
+            raw_tag = img['tags'][0] if img.get('tags') else 'General'
+            
+            # Map sync tags vs user prefix tags
+            if raw_tag == "system_sync___Local Sync":
+                clean_folder_id = "Local Sync"
+            elif raw_tag.startswith(user_prefix):
+                clean_folder_id = raw_tag.replace(user_prefix, "", 1)
+            else:
+                continue
+
+            media_list.append({
+                'public_id': img['public_id'],
+                'url': img['secure_url'],
+                'type': 'image',
+                'resolution': f"{img.get('width', 'N/A')}x{img.get('height', 'N/A')}",
+                'folder_id': clean_folder_id,
+                'created_at': img['created_at']
+            })
+            
+        # Fetch Videos
+        videos = cloudinary.api.resources(resource_type="video", max_results=100, tags=True)
+        for vid in videos.get('resources', []):
+            raw_tag = vid['tags'][0] if vid.get('tags') else 'General'
+            
+            if raw_tag == "system_sync___Local Sync":
+                clean_folder_id = "Local Sync"
+            elif raw_tag.startswith(user_prefix):
+                clean_folder_id = raw_tag.replace(user_prefix, "", 1)
+            else:
+                continue
+
+            media_list.append({
+                'public_id': vid['public_id'], #
+                'url': vid['secure_url'],
+                'type': 'video',
+                'resolution': f"{vid.get('width', 'N/A')}x{vid.get('height', 'N/A')}",
+                'folder_id': clean_folder_id,
+                'created_at': vid['created_at']
+            }) #
+            
+        media_list.sort(key=lambda x: x['created_at'], reverse=True)
+        return jsonify(media_list)
+        
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/upload', methods=['POST'])
+@login_required
+def upload_media():
+    if 'file' not in request.files:
+        return jsonify({"error": "No file part"}), 400
+        
+    file = request.files['file'] #
+    tag = request.form.get('tag', 'General')
+    
+    if file.filename == '':
+        return jsonify({"error": "No selected file"}), 400
+
+    filename = file.filename.lower()
+    res_type = 'video' if filename.endswith(('.mp4', '.mov', '.avi', '.mkv')) else 'image'
+
+    # Intercept target folder tags and explicitly prefix them with the authenticated session variable 
+    current_user = session.get('user')
+    user_isolated_tag = f"{current_user}___{tag}"
+
+    try:
+        upload_result = cloudinary.uploader.upload(file, resource_type=res_type, tags=[user_isolated_tag])
+        return jsonify({
+            "success": True,
+            "url": upload_result['secure_url'], #
+            "type": res_type,
+            "resolution": f"{upload_result.get('width', 'N/A')}x{upload_result.get('height', 'N/A')}"
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/api/delete-asset', methods=['POST'])
+@login_required
+def delete_asset():
+    data = request.get_json() or {}
+    public_id = data.get('public_id')
+    resource_type = data.get('resource_type', 'image')
+    
+    if not public_id:
+        return jsonify({"error": "Missing public asset identifier tracking map"}), 400 #
+        
+    try:
+        cloudinary.uploader.destroy(public_id, resource_type=resource_type)
+        return jsonify({"success": True})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+if __name__ == '__main__':
+    upload_local_media_on_start()
+    app.run(debug=True, port=5000)
 
